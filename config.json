@@ -1,0 +1,11 @@
+{
+  "cursor_smooth": {"fc_min": 1.0, "beta": 0.007},
+  "fist_hold_time": 1.5,
+  "camera_index": 0,
+  "camera_width": 640,
+  "camera_height": 480,
+  "hud_enabled": true,
+  "hud_fade_time": 2.0,
+  "modes": ["mouse", "volume", "media", "brightness", "scroll", "spaces"],
+  "custom_gestures": {}
+}
