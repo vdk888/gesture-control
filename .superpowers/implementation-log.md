@@ -1,5 +1,114 @@
 # Gesture Control v2 -- Implementation Log
 
+## Task 14: Menubar App Wrapper (2026-07-17)
+
+**Files**: `menubar_app.py`, `com.bubble.gesture-control.plist`, `requirements.txt`
+
+### Patterns
+- The menubar app follows the exact architecture from `audio-listener/menubar_app.py`:
+  rumps.App with custom `quit_button=None`, PIL-drawn icons at 4x supersampling with
+  LANCZOS downsampling, and a rumps.Timer polling shared state every 2s.
+- GestureController wraps the `gesture_control.py` main loop, adapted for background-thread
+  operation. cv2.imshow/cv2.waitKey are removed (cannot run on non-main thread on macOS);
+  the HUD overlay provides all visual feedback.
+- `_SharedState` bridges the background gesture loop and the main-thread menubar using
+  threading.Lock. Status fields are written by the gesture loop, read by the timer callback.
+  Toggle commands are flag-based (set by menubar, consumed atomically by the gesture loop).
+- Icon states: green filled dot (active), grey ring (paused/off), red filled dot (error).
+  Colours are drawn directly in PIL (not template=True) since rumps template=True would
+  strip the colour -- the spec explicitly requires green/red dots.
+- Voice always-on toggle sets `VoiceMode._always_on` directly and starts/stops the
+  pipeline. Voice mute stops the pipeline independently of always-on state.
+- The LaunchAgent plist uses `LimitLoadToSessionType: Aqua` (required for GUI apps),
+  `RunAtLoad: true` (auto-start at login), and `KeepAlive: true` (restart on crash).
+
+### Gotchas
+- `OrbLayer()` constructor signature: the `demo_orb.py` and `hud.py` usage passes
+  `NSMakeRect(0, 0, w, h)` but the `OrbLayer.__init__` from `orbs.py` takes a frame
+  rect. The controller calls `OrbLayer()` with no args as a fallback; this may raise
+  TypeError. The orb toggle is a best-effort feature.
+- rumps `timer.start()` must be called AFTER the app menu is built -- calling it before
+  menu assignment can cause the timer callback to fire with incomplete menu items.
+- The `_apply_toggle_*` methods on `_SharedState` are called from the gesture loop
+  thread (not under the lock they would normally use). This is safe because they are
+  called AFTER `consume_toggles()` which clears the flags, so there's no contention
+  between the write path (gesture loop calling _apply) and the read path (timer callback
+  reading via snapshot). The snapshot() call does take the lock to ensure a consistent
+  read.
+
+### Commands
+```bash
+# Syntax check
+python3 -c "import ast; ast.parse(open('menubar_app.py').read()); print('OK')"
+
+# Test icon generation + shared state (no GUI)
+python3 -c "exec(open('menubar_app.py').read().split('class GestureControlApp')[0]); \
+  state = _SharedState(); state.set_status('Mouse', 30.0, 'Pointing'); \
+  s = state.snapshot(); print(s)"
+
+# Validate plist
+plutil -lint com.bubble.gesture-control.plist
+
+# Run (requires display + camera)
+python3 menubar_app.py
+
+# Install LaunchAgent for auto-start at login
+cp com.bubble.gesture-control.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bubble.gesture-control.plist
+
+# Uninstall LaunchAgent
+launchctl bootout gui/$(id -u)/com.bubble.gesture-control
+```
+
+## Task 13: VoiceMode (2026-07-17)
+
+**Files**: `modes/voice.py`, `modes/__init__.py`, `tests/test_voice_mode.py`
+
+### Patterns
+- VoiceMode follows the Mode ABC (`modes/base.py`). It uses lazy imports for
+  `voice.pipeline.VoicePipeline` and `voice.screenshot.capture_screenshot` so the
+  mode is importable even before those modules are built. Sentinels `False` (not `None`)
+  mark import-failure so retries are skipped.
+- Three-frame state machine: trigger-held-fn0 starts listening, trigger-held-fn1..N shows
+  partials, trigger-released stops + injects + captures screenshot.
+- The release path must come BEFORE the always-on display path in `update()`, otherwise
+  always-on mode eats the gesture release and never injects.
+- In always-on mode, trigger gestured while already listening (VAD active) still sets
+  `_was_listening = True` so the next non-trigger frame fires the release path.
+- Inject format: `VOICE_GESTURE ts=... authorized=yes path=... screenshot=...` header
+  line + French-language body line appended to the DeepSeek inject file.
+- `300ms` cooldown (hardcoded `0.300s`) blocks re-trigger after release.
+- Always-on toggle: Peace sign held `>= 1.0s` (configurable) toggles runtime state.
+- Tests mock `voice.pipeline` by injecting `MockPipeline` into a module-level global
+  (`modes.voice._VoicePipeline`) before `VoiceMode.enter()` lazy-loads it.
+
+### Gotchas
+- `_make_gesture(landmarks=None)` auto-created landmarks via the helper's default-logic
+  guard (`if landmarks is None: landmarks = _make_landmarks()`). Tests needing truly
+  None landmarks must construct `GestureData` directly, bypassing the helper.
+- `monkeypatch.setattr("modes.voice.detect_ok_sign", ...)` fails because
+  `detect_ok_sign` is imported at call-time inside `_is_trigger` via
+  `from hand_tracking import detect_ok_sign`. The patch target must be
+  `hand_tracking.detect_ok_sign`, not `modes.voice.detect_ok_sign`.
+- `time.monotonic()` (not `time.time()`) for internal timing because it's
+  immune to system clock adjustments.
+- The inject format test must inspect the `mock_open()` handle's `.write.call_args_list`
+  rather than trying `__globals__["open"]` on the bound method.
+- `exit()` sets `_pipeline = None` after calling `stop()`. Tests checking `_stop_count`
+  must save the pipeline reference before calling `exit()`.
+
+### Commands
+```bash
+# Run voice mode tests
+python3 -m pytest tests/test_voice_mode.py -v
+
+# Run full suite (excluding pre-existing config test failure)
+python3 -m pytest tests/ -v --ignore=tests/test_config_manager.py
+
+# Import check
+python3 -c "from modes.voice import VoiceMode; print(VoiceMode.name)"
+```
+
 ## Task 12: Ethereal Breathing Orb (2026-07-17)
 
 **Files**: `orbs.py`, `demo_orb.py`, `tests/test_orb.py`

@@ -19,52 +19,100 @@ try:
     from orbs import OrbLayer, OrbState
 except ImportError:
     OrbLayer = None  # type: ignore[assignment]
-    OrbState = None  # type: ignore[assignment]
+    OrbState = None
+
+# ── Gesture cheat sheet per mode ────────────────────────────────────────
+
+CHEAT_SHEET = {
+    "Mouse": [
+        "Point → move cursor",
+        "Pinch thumb+index → click",
+        "Fist hold → next mode",
+    ],
+    "Volume": [
+        "Point → adjust volume",
+        "Fist hold → next mode",
+    ],
+    "Media": [
+        "Open palm hold → play/pause",
+        "Fist hold → next mode",
+    ],
+    "Brightness": [
+        "Point → adjust brightness",
+        "Fist hold → next mode",
+    ],
+    "Scroll": [
+        "Two fingers ↑↓ → scroll",
+        "Fist hold → next mode",
+    ],
+    "Spaces": [
+        "Open palm ←→ → switch desktop",
+        "Open palm ↑ → Mission Control",
+        "Open palm ↓ → Show Desktop",
+        "Fist hold → next mode",
+    ],
+    "Voice": [
+        "3 fingers hold → speak",
+        "Release → send + screenshot",
+        "Peace hold 1s → always-on",
+        "Fist hold → next mode",
+    ],
+}
+
+
+def _draw_cheat_sheet(frame, mode_name):
+    """Draw semi-transparent gesture cheat sheet for current mode."""
+    if mode_name not in CHEAT_SHEET:
+        return
+    h, w = frame.shape[:2]
+    lines = CHEAT_SHEET[mode_name]
+
+    # Semi-transparent background box (right side)
+    box_w = 300
+    box_h = 20 + len(lines) * 22
+    x0, y0 = w - box_w - 10, 40
+    x1, y1 = x0 + box_w, y0 + box_h
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
+
+    # Title
+    cv2.putText(frame, f"Gestures — {mode_name}", (x0 + 10, y0 + 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 100), 1)
+    # Lines
+    for i, line in enumerate(lines):
+        cv2.putText(frame, line, (x0 + 10, y0 + 48 + i * 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
 
 # ── Orb state helper ────────────────────────────────────────────────────
 
-
 def _compute_orb_state(mode, gesture_name):
-    """Determine orb visual state from current mode and gesture context.
-
-    Returns an OrbState enum value, or None if OrbState is not available.
-    The orb visually signals: idle / listening / thinking / speaking / error.
-    """
+    """Determine orb visual state from current mode and gesture context."""
     if OrbState is None:
         return None
-
-    # No hand detected → always idle
     if not gesture_name:
         return OrbState.IDLE
-
     # VoiceMode-specific states
-    if mode.name == "Voice":
-        # Error check first (takes priority over other states)
-        if getattr(mode, "error", None) or getattr(mode, "_error", None):
-            return OrbState.ERROR
-        # Listening: gesture is held (e.g. 3-finger trigger active)
-        if getattr(mode, "listening", False):
-            return OrbState.LISTENING
-        # Processing: after gesture release, before response
-        if getattr(mode, "processing", False) or getattr(mode, "thinking", False):
-            return OrbState.THINKING
-        # Speaking: TTS playing or response sent
-        if getattr(mode, "speaking", False):
-            return OrbState.SPEAKING
-        # Default: voice mode but not active
-        return OrbState.IDLE
-
-    # Any mode error
-    if getattr(mode, "error", None) or getattr(mode, "_error", None):
+    if hasattr(mode, 'listening') and getattr(mode, 'listening'):
+        return OrbState.LISTENING
+    if hasattr(mode, 'processing') and getattr(mode, 'processing'):
+        return OrbState.THINKING
+    if hasattr(mode, 'speaking') and getattr(mode, 'speaking'):
+        return OrbState.SPEAKING
+    if hasattr(mode, 'error') and getattr(mode, 'error'):
         return OrbState.ERROR
-
+    # Default: breathing idle
     return OrbState.IDLE
 
 
+# ── Main ────────────────────────────────────────────────────────────────
+
 def main():
     config = load_config()
-    print(f"Modes: {' -> '.join(config['modes'])}")
+    mode_order = [m for m in config["modes"] if m in MODE_REGISTRY]
+
+    print(f"Modes: {' → '.join(mode_order)}")
     print("Fist held 1.5s = next mode. q = quit.")
     print("Needs: Camera + Accessibility permissions in System Settings.")
 
@@ -77,7 +125,13 @@ def main():
         return
 
     landmarker = create_landmarker(num_hands=1)
-    hud = HUD() if config.get("hud_enabled") else None
+    hud = HUD()
+
+    # Initialize modes
+    modes = {}
+    for name in mode_order:
+        if name in MODE_REGISTRY:
+            modes[name] = MODE_REGISTRY[name](config, hud)
 
     # ── Initialize orb (optional, fails gracefully if orbs.py unavailable) ──
     orb = None
@@ -86,33 +140,19 @@ def main():
             orb_size = 80
             orb_frame = ((0, 0), (orb_size, orb_size))
             orb = OrbLayer(orb_frame)
-            if hud is not None:
-                hud.add_orb_layer(orb)
+            hud.add_orb_layer(orb)
+            hud.show(text="")  # Show HUD window immediately
+            print("Orb initialized.")
         except Exception as e:
             print(f"Warning: Could not initialize orb: {e}")
             orb = None
-    elif hud is not None:
+    else:
         print("Note: orbs module not available, continuing without orb")
 
-    # Initialize modes (skip any whose class failed to import)
-    mode_names = config["modes"]
-    modes = {}
-    for name in mode_names:
-        if name in MODE_REGISTRY and MODE_REGISTRY[name] is not None:
-            modes[name] = MODE_REGISTRY[name](config, hud)
-
-    if not modes:
-        print("No valid modes configured. Exiting.")
-        cap.release()
-        landmarker.close()
-        return
-
-    mode_order = list(modes.keys())
-    current_idx = 0
-    current_mode = modes[mode_order[current_idx]]
+    mode_index = 0
+    current_mode = modes[mode_order[mode_index]]
     current_mode.enter()
 
-    # Mode switching state
     fist_start = None
     fist_active = False
     fist_hold = config["fist_hold_time"]
@@ -126,7 +166,6 @@ def main():
 
         frame = cv2.flip(frame, 1)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
         ts = int(time.time() * 1000)
         last_ts = max(ts, last_ts + 1)
         now = time.time()
@@ -152,8 +191,8 @@ def main():
                 fist_start = now
             elif now - fist_start >= fist_hold and not fist_active:
                 current_mode.exit()
-                current_idx = (current_idx + 1) % len(mode_order)
-                current_mode = modes[mode_order[current_idx]]
+                mode_index = (mode_index + 1) % len(mode_order)
+                current_mode = modes[mode_order[mode_index]]
                 current_mode.enter()
                 fist_active = True
                 if hud:
@@ -170,20 +209,20 @@ def main():
         )
         hud_data = current_mode.update(gd)
 
-        # Update orb state (tracks VoiceMode listening/thinking/speaking)
+        # Update orb state
         if orb is not None:
             orb_state = _compute_orb_state(current_mode, gesture_name)
             if orb_state is not None:
                 orb.transition_to(orb_state)
-            dt = now - prev
-            orb.tick(dt)
+            orb.tick(time.time() - prev)
 
-        # Update HUD — suppress text overlay when orb provides visual feedback
-        if hud and hud_data:
-            if orb is None:
-                hud.show(**hud_data)
+        # Always show HUD — orb replaces label content, not the window
+        if hud_data:
+            hud.show(**hud_data)
+        elif orb is not None and not hud._visible:
+            hud.show(text="")
 
-        # Camera window overlays
+        # Camera overlays
         cv2.putText(frame, f"Mode: {current_mode.name}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         fps = 1.0 / max(now - prev, 1e-6)
@@ -192,6 +231,9 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         cv2.putText(frame, "fist 1.5s = mode    q = quit", (10, height - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 2)
+
+        # Gesture cheat sheet
+        _draw_cheat_sheet(frame, current_mode.name)
 
         cv2.imshow("Gesture Control", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
