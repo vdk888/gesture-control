@@ -107,7 +107,7 @@ def fingers_up(landmarks):
     pinky_mcp = landmarks[17]
     MARGIN = 1.15  # tip must be 15% farther than PIP to count as extended
     up = []
-    up.append(_dist(landmarks[4], pinky_mcp) * MARGIN < _dist(landmarks[3], pinky_mcp))
+    up.append(_dist(landmarks[4], pinky_mcp) > _dist(landmarks[3], pinky_mcp) * MARGIN)
     for tip, pip in zip(FINGER_TIPS, FINGER_PIPS):
         up.append(_dist(landmarks[tip], wrist) > _dist(landmarks[pip], wrist) * MARGIN)
     return up
