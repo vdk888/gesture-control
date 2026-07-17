@@ -482,3 +482,50 @@ class VoicePipeline:
             log.info("Injected -> %s: %s", self.inject_path.name, header[:120])
         except Exception as e:
             log.error("Inject failed: %s", e)
+
+    def flush(self):
+        """Return last 15 s of audio + transcript WITHOUT stopping the stream.
+
+        Returns (audio_path, transcript, duration_s) or None if no speech.
+        Used by the 3-finger trigger to snapshot recent audio."""
+        with self._lock:
+            if not self._speech_buffer or len(self._speech_buffer) < self.sample_rate * 0.5:
+                return None
+            audio = np.array(list(self._speech_buffer), dtype=np.float32)
+            # Keep only last 15 s
+            max_samples = self._max_buffer_samples
+            if len(audio) > max_samples:
+                audio = audio[-max_samples:]
+
+        duration = len(audio) / self.sample_rate
+
+        # Save WAV
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        wav_path = self.cache_dir / f"flush_{ts}.wav"
+        audio_clamped = np.clip(audio, -1.0, 1.0)
+        audio_int16 = (audio_clamped * 32767).astype(np.int16)
+        with wave.open(str(wav_path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(self.sample_rate)
+            wf.writeframes(audio_int16.tobytes())
+
+        # Transcribe full audio
+        transcript = self._transcribe(audio) or ""
+
+        log.info("Flush: %.1fs, transcript: %s", duration, transcript[:80] if transcript else "(empty)")
+        return (str(wav_path), transcript, duration)
+
+    def pause(self):
+        """Pause VAD processing (mic stays open but audio is dropped)."""
+        self._listening = False
+        log.info("Voice pipeline paused")
+
+    def resume(self):
+        """Resume VAD processing."""
+        self._listening = True
+        self._speech_buffer = []
+        self._speech_active = False
+        self._silence_samples = 0
+        self.vad.reset_silero_state()
+        log.info("Voice pipeline resumed")

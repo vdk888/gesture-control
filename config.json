@@ -6,7 +6,7 @@
   "camera_height": 480,
   "hud_enabled": true,
   "hud_fade_time": 2.0,
-  "modes": ["mouse", "volume", "media", "brightness", "scroll", "spaces", "voice"],
+  "modes": ["cursor", "system"],
   "custom_gestures": {},
   "voice": {
     "enabled": true,

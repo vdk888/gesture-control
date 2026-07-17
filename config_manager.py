@@ -2,7 +2,8 @@
 import json
 import os
 
-VALID_MODES = {"mouse", "volume", "media", "brightness", "scroll", "spaces", "custom", "voice"}
+VALID_MODES = {"cursor", "system", "voice",
+               "mouse", "volume", "media", "brightness", "scroll", "spaces", "custom"}
 
 DEFAULT_CONFIG = {
     "cursor_smooth": {"fc_min": 1.0, "beta": 0.007},
@@ -15,7 +16,7 @@ DEFAULT_CONFIG = {
     "margin": 0.15,
     "hud_enabled": True,
     "hud_fade_time": 2.0,
-    "modes": ["mouse", "volume", "media", "brightness", "scroll", "spaces", "voice"],
+    "modes": ["cursor", "system"],
     "custom_gestures": {},
     "voice": {
         "enabled": True,

@@ -1,7 +1,26 @@
 from modes.base import Mode, GestureData
 
-# Forward imports for mode classes created in tasks 5-8.
-# Wrapped in try/except so the package is importable before all modes exist.
+# -- New unified modes (v2 architecture) ----------------------------------
+
+try:
+    from modes.cursor import CursorMode  # noqa: F401
+except ImportError:
+    CursorMode = None  # type: ignore[assignment]
+
+try:
+    from modes.system import SystemMode  # noqa: F401
+except ImportError:
+    SystemMode = None  # type: ignore[assignment]
+
+try:
+    from modes.voice import VoiceMode  # noqa: F401
+except ImportError:
+    VoiceMode = None  # type: ignore[assignment]
+
+# -- Backward-compat: old single-purpose modes ----------------------------
+# These stay in the codebase and still work if manually enabled via config,
+# but are removed from the default cycle.
+
 try:
     from modes.mouse import MouseMode  # noqa: F401
 except ImportError:
@@ -37,18 +56,18 @@ try:
 except ImportError:
     CustomMode = None  # type: ignore[assignment]
 
-try:
-    from modes.voice import VoiceMode  # noqa: F401
-except ImportError:
-    VoiceMode = None  # type: ignore[assignment]
 
 MODE_REGISTRY = {
-    "mouse": MouseMode,
-    "volume": VolumeMode,
-    "media": MediaMode,
+    # v2 primary modes (default cycle)
+    "cursor": CursorMode,
+    "system": SystemMode,
+    "voice":  VoiceMode,
+    # Backward-compat: old modes still usable if manually enabled in config
+    "mouse":      MouseMode,
+    "volume":     VolumeMode,
+    "media":      MediaMode,
     "brightness": BrightnessMode,
-    "scroll": ScrollMode,
-    "spaces": SpacesMode,
-    "custom": CustomMode,
-    "voice": VoiceMode,
+    "scroll":     ScrollMode,
+    "spaces":     SpacesMode,
+    "custom":     CustomMode,
 }
