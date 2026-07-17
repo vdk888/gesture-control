@@ -70,3 +70,24 @@ white, black), `c` clear, `e` toggle eraser, `q` quit.
   `hand_tracking.py` need it. Enable your terminal under System Settings >
   Privacy & Security > Accessibility, then rerun. Without it, macOS silently
   drops those events.
+
+## v2 Architecture
+
+```
+gesture-control/
+├── gesture_control.py     # main loop, mode dispatch
+├── hand_tracking.py        # shared: MediaPipe, finger detection
+├── filters.py              # 1€ filter for cursor smoothing
+├── config_manager.py       # JSON config load/save/validate
+├── hud.py                  # transparent macOS overlay (PyObjC)
+├── modes/
+│   ├── mouse.py            # cursor + click/drag
+│   ├── volume.py           # volume slider
+│   ├── media.py            # play/pause media key
+│   ├── brightness.py       # screen brightness
+│   ├── scroll.py           # two-finger scroll
+│   ├── spaces.py           # desktop switching
+│   └── custom.py           # user-defined gestures from config
+├── config.json             # default configuration
+└── tests/                  # 60 tests
+```
