@@ -10,7 +10,7 @@ DEFAULT_CONFIG = {
     "pinch_on": 0.45,
     "pinch_off": 0.70,
     "fist_hold_time": 1.5,
-    "camera_index": 0,
+    "camera_index": 1,
     "camera_width": 640,
     "camera_height": 480,
     "margin": 0.15,
