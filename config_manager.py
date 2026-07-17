@@ -15,8 +15,26 @@ DEFAULT_CONFIG = {
     "margin": 0.15,
     "hud_enabled": True,
     "hud_fade_time": 2.0,
-    "modes": ["mouse", "volume", "media", "brightness", "scroll", "spaces"],
+    "modes": ["mouse", "volume", "media", "brightness", "scroll", "spaces", "voice"],
     "custom_gestures": {},
+    "voice": {
+        "enabled": True,
+        "trigger_gesture": "3 fingers",
+        "always_on": False,
+        "sample_rate": 16000,
+        "silero_threshold": 0.5,
+        "min_speech_s": 0.5,
+        "silence_trigger_s": 0.7,
+        "whisper_model": "base",
+        "whisper_device": "auto",
+        "whisper_compute": "int8",
+        "whisper_language": "fr",
+        "inject_path": "~/.claude/channels/telegram-deepseek/inject",
+        "screenshot_enabled": True,
+        "screenshot_dir": "~/.cache/gesture-control/screenshots",
+        "always_on_toggle_gesture": "Peace",
+        "always_on_toggle_hold_s": 1.0,
+    },
 }
 
 def _deep_merge(base, override):
