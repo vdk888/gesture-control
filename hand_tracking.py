@@ -50,18 +50,14 @@ FINGER_PIPS = [6, 10, 14, 18]
 
 
 def create_landmarker(num_hands=1):
-    """Create a MediaPipe HandLandmarker with GPU delegate.
+    """Create a MediaPipe HandLandmarker.
 
-    Args:
-        num_hands: Maximum number of hands to detect (default 1).
-
-    Returns:
-        A configured vision.HandLandmarker instance.
-    """
+    Uses CPU delegate — Metal GPU requires RGBA format that OpenCV BGR
+    frames don't provide. CPU is ~5ms on M4, plenty fast for 30 FPS."""
     options = vision.HandLandmarkerOptions(
         base_options=python.BaseOptions(
             model_asset_path=MODEL_PATH,
-            delegate=python.BaseOptions.Delegate.GPU,
+            delegate=python.BaseOptions.Delegate.CPU,
         ),
         running_mode=vision.RunningMode.VIDEO,
         num_hands=num_hands,

@@ -83,7 +83,9 @@ def main():
     orb = None
     if OrbLayer is not None:
         try:
-            orb = OrbLayer()
+            orb_size = 80
+            orb_frame = ((0, 0), (orb_size, orb_size))
+            orb = OrbLayer(orb_frame)
             if hud is not None:
                 hud.add_orb_layer(orb)
         except Exception as e:
