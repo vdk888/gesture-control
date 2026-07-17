@@ -92,25 +92,24 @@ def fingers_up(landmarks):
     """Determine which fingers are extended from a set of 21 hand landmarks.
 
     A digit is considered extended when its tip is farther from a reference
-    joint than the joint below it. The thumb is compared against the pinky MCP;
-    the four fingers are compared against the wrist.
+    joint than the joint below it, with a 15% margin to prevent jitter.
+    The thumb is compared against the pinky MCP; the four fingers are
+    compared against the wrist.
 
     Args:
-        landmarks: A list of 21 landmark objects, each with .x and .y attributes
-                   in normalized [0, 1] coordinates.
+        landmarks: A list of 21 landmark objects, each with .x and .y
+                   attributes in normalized [0, 1] coordinates.
 
     Returns:
         A list of 5 booleans: [thumb, index, middle, ring, pinky].
     """
     wrist = landmarks[0]
     pinky_mcp = landmarks[17]
+    MARGIN = 1.15  # tip must be 15% farther than PIP to count as extended
     up = []
-    # A digit is extended when its tip is farther from a reference joint than the
-    # joint below it. Fingers reach out from the wrist; the thumb swings sideways
-    # from the pinky's base. Using distances (not raw x/y) survives a tilted hand.
-    up.append(_dist(landmarks[4], pinky_mcp) > _dist(landmarks[3], pinky_mcp))
+    up.append(_dist(landmarks[4], pinky_mcp) * MARGIN < _dist(landmarks[3], pinky_mcp))
     for tip, pip in zip(FINGER_TIPS, FINGER_PIPS):
-        up.append(_dist(landmarks[tip], wrist) > _dist(landmarks[pip], wrist))
+        up.append(_dist(landmarks[tip], wrist) > _dist(landmarks[pip], wrist) * MARGIN)
     return up
 
 
