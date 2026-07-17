@@ -1,8 +1,8 @@
-opencv-python
-mediapipe
-pyobjc-framework-Quartz
-pyobjc-framework-Cocoa
-sounddevice
-silero-vad
-faster-whisper
-onnxruntime
+opencv-python         # webcam capture + frame processing
+mediapipe            # hand landmark detection
+pyobjc-framework-Quartz  # screenshot capture (CGDisplayCreateImage)
+pyobjc-framework-Cocoa   # screenshot PNG encoding (NSBitmapImageRep)
+sounddevice          # mic capture (PortAudio via sounddevice)
+silero-vad           # VAD ONNX model -- voice activity detection
+faster-whisper       # STT transcription (CTranslate2, Apple Silicon)
+onnxruntime          # ONNX runtime for Silero VAD inference
