@@ -49,11 +49,63 @@ FINGER_TIPS = [8, 12, 16, 20]
 FINGER_PIPS = [6, 10, 14, 18]
 
 
+def create_landmarker(num_hands=1):
+    """Create a MediaPipe HandLandmarker with GPU delegate.
+
+    Args:
+        num_hands: Maximum number of hands to detect (default 1).
+
+    Returns:
+        A configured vision.HandLandmarker instance.
+    """
+    options = vision.HandLandmarkerOptions(
+        base_options=python.BaseOptions(
+            model_asset_path=MODEL_PATH,
+            delegate=python.BaseOptions.Delegate.GPU,
+        ),
+        running_mode=vision.RunningMode.VIDEO,
+        num_hands=num_hands,
+        min_hand_detection_confidence=0.6,
+        min_tracking_confidence=0.5,
+    )
+    return vision.HandLandmarker.create_from_options(options)
+
+
+def detect(landmarker, frame_rgb, timestamp_ms):
+    """Run hand detection on an RGB frame.
+
+    Args:
+        landmarker: A configured vision.HandLandmarker instance.
+        frame_rgb: An SRGB-format image as a numpy array (H, W, 3).
+        timestamp_ms: Monotonically increasing millisecond timestamp.
+
+    Returns:
+        A HandLandmarkerResult with hand_landmarks, hand_world_landmarks,
+        and handedness lists.
+    """
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+    return landmarker.detect_for_video(mp_image, timestamp_ms)
+
+
 def _dist(a, b):
+    """Euclidean distance between two landmarks (or any objects with .x and .y)."""
     return math.hypot(a.x - b.x, a.y - b.y)
 
 
 def fingers_up(landmarks):
+    """Determine which fingers are extended from a set of 21 hand landmarks.
+
+    A digit is considered extended when its tip is farther from a reference
+    joint than the joint below it. The thumb is compared against the pinky MCP;
+    the four fingers are compared against the wrist.
+
+    Args:
+        landmarks: A list of 21 landmark objects, each with .x and .y attributes
+                   in normalized [0, 1] coordinates.
+
+    Returns:
+        A list of 5 booleans: [thumb, index, middle, ring, pinky].
+    """
     wrist = landmarks[0]
     pinky_mcp = landmarks[17]
     up = []
@@ -67,6 +119,15 @@ def fingers_up(landmarks):
 
 
 def name_gesture(up):
+    """Map a fingers-up boolean list to a human-readable gesture name.
+
+    Args:
+        up: A list of 5 booleans: [thumb, index, middle, ring, pinky].
+
+    Returns:
+        A gesture name string: "Fist", "Open palm", "Peace", "Pointing",
+        "Thumbs up", or "N fingers" for unrecognized combinations.
+    """
     thumb, index, middle, ring, pinky = up
     count = sum(up)
     if count == 0:
@@ -83,6 +144,15 @@ def name_gesture(up):
 
 
 def draw_hand(frame, landmarks):
+    """Draw a hand skeleton overlay on a BGR video frame.
+
+    Draws white connection lines between hand landmarks and green dots at
+    each landmark position.
+
+    Args:
+        frame: A BGR-format numpy array (H, W, 3) to draw on (mutated in-place).
+        landmarks: A list of 21 landmark objects with .x and .y in [0, 1].
+    """
     height, width = frame.shape[:2]
     points = [(int(p.x * width), int(p.y * height)) for p in landmarks]
     for a, b in HAND_CONNECTIONS:
