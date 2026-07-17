@@ -6,3 +6,5 @@ sounddevice          # mic capture (PortAudio via sounddevice)
 silero-vad           # VAD ONNX model -- voice activity detection
 faster-whisper       # STT transcription (CTranslate2, Apple Silicon)
 onnxruntime          # ONNX runtime for Silero VAD inference
+rumps                # macOS menu bar app wrapper
+Pillow               # image drawing for menu bar icons

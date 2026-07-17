@@ -654,3 +654,146 @@ class TestEdgeCases:
             # mode_a should be entered at least twice: once as initial, once after wrap
             assert mode_a.enter_calls >= 2
             assert mode_b.enter_calls >= 1
+
+
+# ── Orb state computation tests ────────────────────────────────────────
+
+
+# A minimal OrbState stand-in for testing when orbs.py is not available.
+class _FakeOrbState:
+    IDLE = "IDLE"
+    LISTENING = "LISTENING"
+    THINKING = "THINKING"
+    SPEAKING = "SPEAKING"
+    ERROR = "ERROR"
+
+
+class FakeVoiceMode(FakeMode):
+    """A FakeMode that carries VoiceMode-specific state attributes."""
+
+    _name = "Voice"
+
+    def __init__(self, config, hud=None):
+        super().__init__(config, hud)
+        self.listening = False
+        self.processing = False
+        self.thinking = False
+        self.speaking = False
+        self.error = None
+        self._error = None
+
+
+class TestOrbStateComputation:
+    """Unit tests for _compute_orb_state() — pure logic, no orbs.py needed."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_orb_state(self):
+        """Inject a fake OrbState so tests work without orbs.py installed."""
+        with patch.object(gesture_control, "OrbState", _FakeOrbState):
+            yield
+
+    def test_no_hand_returns_idle(self):
+        """When no hand is detected (empty gesture), orb should be idle."""
+        mode = FakeVoiceMode(DEFAULT_CONFIG)
+        result = gesture_control._compute_orb_state(mode, "")
+        assert result == _FakeOrbState.IDLE
+
+    def test_voice_mode_not_active_returns_idle(self):
+        """VoiceMode with no active flags should show idle orb."""
+        mode = FakeVoiceMode(DEFAULT_CONFIG)
+        result = gesture_control._compute_orb_state(mode, "3 fingers")
+        assert result == _FakeOrbState.IDLE
+
+    def test_voice_mode_listening_returns_listening(self):
+        """When VoiceMode.listening is True, orb should show LISTENING."""
+        mode = FakeVoiceMode(DEFAULT_CONFIG)
+        mode.listening = True
+        result = gesture_control._compute_orb_state(mode, "3 fingers")
+        assert result == _FakeOrbState.LISTENING
+
+    def test_voice_mode_processing_returns_thinking(self):
+        """When VoiceMode.processing is True, orb should show THINKING."""
+        mode = FakeVoiceMode(DEFAULT_CONFIG)
+        mode.processing = True
+        result = gesture_control._compute_orb_state(mode, "3 fingers")
+        assert result == _FakeOrbState.THINKING
+
+    def test_voice_mode_thinking_returns_thinking(self):
+        """VoiceMode.thinking attr also maps to THINKING (alias for concurrent builder)."""
+        mode = FakeVoiceMode(DEFAULT_CONFIG)
+        mode.thinking = True
+        result = gesture_control._compute_orb_state(mode, "3 fingers")
+        assert result == _FakeOrbState.THINKING
+
+    def test_voice_mode_speaking_returns_speaking(self):
+        """When VoiceMode.speaking is True, orb should show SPEAKING."""
+        mode = FakeVoiceMode(DEFAULT_CONFIG)
+        mode.speaking = True
+        result = gesture_control._compute_orb_state(mode, "3 fingers")
+        assert result == _FakeOrbState.SPEAKING
+
+    def test_voice_mode_error_takes_priority(self):
+        """Error state should take priority over other voice states."""
+        mode = FakeVoiceMode(DEFAULT_CONFIG)
+        mode.listening = True
+        mode.speaking = True
+        mode.error = "microphone access denied"
+        result = gesture_control._compute_orb_state(mode, "3 fingers")
+        assert result == _FakeOrbState.ERROR
+
+    def test_voice_mode_underscore_error(self):
+        """_error attribute (private variant) should also trigger ERROR state."""
+        mode = FakeVoiceMode(DEFAULT_CONFIG)
+        mode._error = "timeout"
+        result = gesture_control._compute_orb_state(mode, "3 fingers")
+        assert result == _FakeOrbState.ERROR
+
+    def test_non_voice_mode_returns_idle(self):
+        """A non-Voice mode (e.g. Mouse) should default to IDLE."""
+        mode = FakeMode(DEFAULT_CONFIG)
+        mode._name = "Mouse"
+        result = gesture_control._compute_orb_state(mode, "Pointing")
+        assert result == _FakeOrbState.IDLE
+
+    def test_non_voice_mode_error_returns_error(self):
+        """Any mode with an error flag should show ERROR orb."""
+        mode = FakeMode(DEFAULT_CONFIG)
+        mode._name = "Mouse"
+        mode.error = "permission denied"
+        result = gesture_control._compute_orb_state(mode, "Pointing")
+        assert result == _FakeOrbState.ERROR
+
+    def test_orb_state_none_when_orbstate_unavailable(self):
+        """When OrbState is None (import failed), returns None gracefully."""
+        mode = FakeVoiceMode(DEFAULT_CONFIG)
+        # Override the autouse fixture by patching OrbState back to None
+        with patch.object(gesture_control, "OrbState", None):
+            result = gesture_control._compute_orb_state(mode, "Pointing")
+            assert result is None
+
+    def test_empty_gesture_always_idle_even_in_voice_mode(self):
+        """No hand = idle, even if VoiceMode has active flags."""
+        mode = FakeVoiceMode(DEFAULT_CONFIG)
+        mode.listening = True
+        mode.speaking = True
+        result = gesture_control._compute_orb_state(mode, "")
+        assert result == _FakeOrbState.IDLE
+
+
+# ── MODE_REGISTRY structure tests ──────────────────────────────────────
+
+
+class TestModeRegistryVoice:
+    """Verify VoiceMode is registered in MODE_REGISTRY."""
+
+    def test_voice_key_present(self):
+        """MODE_REGISTRY should contain a 'voice' key."""
+        from modes import MODE_REGISTRY as registry
+        assert "voice" in registry
+
+    def test_all_expected_mode_keys_present(self):
+        """All 8 expected modes should be in the registry."""
+        from modes import MODE_REGISTRY as registry
+        expected = {"mouse", "volume", "media", "brightness",
+                     "scroll", "spaces", "custom", "voice"}
+        assert set(registry.keys()) == expected

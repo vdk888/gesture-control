@@ -37,6 +37,11 @@ try:
 except ImportError:
     CustomMode = None  # type: ignore[assignment]
 
+try:
+    from modes.voice import VoiceMode  # noqa: F401
+except ImportError:
+    VoiceMode = None  # type: ignore[assignment]
+
 MODE_REGISTRY = {
     "mouse": MouseMode,
     "volume": VolumeMode,
@@ -45,4 +50,5 @@ MODE_REGISTRY = {
     "scroll": ScrollMode,
     "spaces": SpacesMode,
     "custom": CustomMode,
+    "voice": VoiceMode,
 }

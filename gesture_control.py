@@ -14,6 +14,53 @@ from modes import MODE_REGISTRY
 from config_manager import load_config
 from hud import HUD
 
+# ── Orb integration (optional, fails gracefully if orbs.py not available) ──
+try:
+    from orbs import OrbLayer, OrbState
+except ImportError:
+    OrbLayer = None  # type: ignore[assignment]
+    OrbState = None  # type: ignore[assignment]
+
+
+# ── Orb state helper ────────────────────────────────────────────────────
+
+
+def _compute_orb_state(mode, gesture_name):
+    """Determine orb visual state from current mode and gesture context.
+
+    Returns an OrbState enum value, or None if OrbState is not available.
+    The orb visually signals: idle / listening / thinking / speaking / error.
+    """
+    if OrbState is None:
+        return None
+
+    # No hand detected → always idle
+    if not gesture_name:
+        return OrbState.IDLE
+
+    # VoiceMode-specific states
+    if mode.name == "Voice":
+        # Error check first (takes priority over other states)
+        if getattr(mode, "error", None) or getattr(mode, "_error", None):
+            return OrbState.ERROR
+        # Listening: gesture is held (e.g. 3-finger trigger active)
+        if getattr(mode, "listening", False):
+            return OrbState.LISTENING
+        # Processing: after gesture release, before response
+        if getattr(mode, "processing", False) or getattr(mode, "thinking", False):
+            return OrbState.THINKING
+        # Speaking: TTS playing or response sent
+        if getattr(mode, "speaking", False):
+            return OrbState.SPEAKING
+        # Default: voice mode but not active
+        return OrbState.IDLE
+
+    # Any mode error
+    if getattr(mode, "error", None) or getattr(mode, "_error", None):
+        return OrbState.ERROR
+
+    return OrbState.IDLE
+
 
 def main():
     config = load_config()
@@ -32,11 +79,24 @@ def main():
     landmarker = create_landmarker(num_hands=1)
     hud = HUD() if config.get("hud_enabled") else None
 
-    # Initialize modes
+    # ── Initialize orb (optional, fails gracefully if orbs.py unavailable) ──
+    orb = None
+    if OrbLayer is not None:
+        try:
+            orb = OrbLayer()
+            if hud is not None:
+                hud.add_orb_layer(orb)
+        except Exception as e:
+            print(f"Warning: Could not initialize orb: {e}")
+            orb = None
+    elif hud is not None:
+        print("Note: orbs module not available, continuing without orb")
+
+    # Initialize modes (skip any whose class failed to import)
     mode_names = config["modes"]
     modes = {}
     for name in mode_names:
-        if name in MODE_REGISTRY:
+        if name in MODE_REGISTRY and MODE_REGISTRY[name] is not None:
             modes[name] = MODE_REGISTRY[name](config, hud)
 
     if not modes:
@@ -108,9 +168,18 @@ def main():
         )
         hud_data = current_mode.update(gd)
 
-        # Update HUD
+        # Update orb state (tracks VoiceMode listening/thinking/speaking)
+        if orb is not None:
+            orb_state = _compute_orb_state(current_mode, gesture_name)
+            if orb_state is not None:
+                orb.transition_to(orb_state)
+            dt = now - prev
+            orb.tick(dt)
+
+        # Update HUD — suppress text overlay when orb provides visual feedback
         if hud and hud_data:
-            hud.show(**hud_data)
+            if orb is None:
+                hud.show(**hud_data)
 
         # Camera window overlays
         cv2.putText(frame, f"Mode: {current_mode.name}", (10, 30),
