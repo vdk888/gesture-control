@@ -2,7 +2,7 @@
 import json
 import os
 
-VALID_MODES = {"mouse", "volume", "media", "brightness", "scroll", "spaces", "custom"}
+VALID_MODES = {"mouse", "volume", "media", "brightness", "scroll", "spaces", "custom", "voice"}
 
 DEFAULT_CONFIG = {
     "cursor_smooth": {"fc_min": 1.0, "beta": 0.007},

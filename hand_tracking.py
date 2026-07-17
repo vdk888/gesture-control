@@ -345,3 +345,22 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ── Gesture detection helpers ──────────────────────────────────────────
+
+def detect_ok_sign(landmarks) -> bool:
+    """True if thumb tip touches index tip (OK sign).
+    Ratio of thumb-to-index distance / palm width < 0.15,
+    and middle/ring/pinky are extended."""
+    thumb_index_dist = _dist(landmarks[4], landmarks[8])
+    palm_width = _dist(landmarks[5], landmarks[17]) or 1e-6
+    ratio = thumb_index_dist / palm_width
+    if ratio > 0.15:
+        return False
+    # Verify middle, ring, pinky are extended
+    wrist = landmarks[0]
+    return (
+        _dist(landmarks[12], wrist) > _dist(landmarks[10], wrist) and  # middle
+        _dist(landmarks[16], wrist) > _dist(landmarks[14], wrist) and  # ring
+        _dist(landmarks[20], wrist) > _dist(landmarks[18], wrist)       # pinky
+    )

@@ -2,3 +2,7 @@ opencv-python
 mediapipe
 pyobjc-framework-Quartz
 pyobjc-framework-Cocoa
+sounddevice
+silero-vad
+faster-whisper
+onnxruntime
