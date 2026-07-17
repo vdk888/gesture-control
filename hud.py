@@ -102,7 +102,9 @@ class HUD:
             self._create_window()
         self._orb_layer = orb_layer
         bg = self._window.contentView()
-        bg.layer().addSublayer_(orb_layer.layer)
+        # accept raw CALayer or OrbLayer with .layer property
+        sublayer = orb_layer.layer if hasattr(orb_layer, 'layer') else orb_layer
+        bg.layer().addSublayer_(sublayer)
         self._orb_sublayer_added = True
         self._recalc_layout()
 

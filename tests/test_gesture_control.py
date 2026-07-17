@@ -183,25 +183,17 @@ class TestMainIntegration:
             assert any("Could not open" in str(call) for call in mock_print.call_args_list)
 
     def test_main_no_valid_modes_exits(self):
-        """When MODE_REGISTRY has no matching modes, exit cleanly."""
+        """When MODE_REGISTRY has no matching modes, exit cleanly before opening camera."""
         with patch("gesture_control.cv2.VideoCapture") as mock_cap:
-            mock_cam = MagicMock()
-            mock_cam.isOpened.return_value = True
-            mock_cap.return_value = mock_cam
+            with patch("gesture_control.MODE_REGISTRY", {}):
+                with patch("builtins.print") as mock_print:
+                    result = main()
 
-            with patch("gesture_control.create_landmarker") as mock_create:
-                mock_landmarker = MagicMock()
-                mock_create.return_value = mock_landmarker
-
-                with patch("gesture_control.MODE_REGISTRY", {}):
-                    with patch("builtins.print") as mock_print:
-                        result = main()
-
-                assert result is None
-                mock_cam.release.assert_called_once()
-                mock_landmarker.close.assert_called_once()
-                assert any("No valid modes" in str(call)
-                           for call in mock_print.call_args_list)
+            assert result is None
+            # Camera was never opened because we exit before VideoCapture()
+            mock_cap.assert_not_called()
+            assert any("No valid modes" in str(call)
+                       for call in mock_print.call_args_list)
 
     def test_main_loop_iterates_and_dispatches(self):
         """Main loop should read frames, detect, dispatch to mode, and quit on 'q'."""
@@ -680,7 +672,6 @@ class FakeVoiceMode(FakeMode):
         self.thinking = False
         self.speaking = False
         self.error = None
-        self._error = None
 
 
 class TestOrbStateComputation:
@@ -718,12 +709,12 @@ class TestOrbStateComputation:
         result = gesture_control._compute_orb_state(mode, "3 fingers")
         assert result == _FakeOrbState.THINKING
 
-    def test_voice_mode_thinking_returns_thinking(self):
-        """VoiceMode.thinking attr also maps to THINKING (alias for concurrent builder)."""
+    def test_voice_mode_thinking_falls_through_to_idle(self):
+        """The old 'thinking' attr is deprecated; not checked -> IDLE."""
         mode = FakeVoiceMode(DEFAULT_CONFIG)
         mode.thinking = True
         result = gesture_control._compute_orb_state(mode, "3 fingers")
-        assert result == _FakeOrbState.THINKING
+        assert result == _FakeOrbState.IDLE
 
     def test_voice_mode_speaking_returns_speaking(self):
         """When VoiceMode.speaking is True, orb should show SPEAKING."""
@@ -741,10 +732,10 @@ class TestOrbStateComputation:
         result = gesture_control._compute_orb_state(mode, "3 fingers")
         assert result == _FakeOrbState.ERROR
 
-    def test_voice_mode_underscore_error(self):
-        """_error attribute (private variant) should also trigger ERROR state."""
+    def test_voice_mode_error_attribute_triggers_error(self):
+        """Setting mode.error should trigger ERROR state."""
         mode = FakeVoiceMode(DEFAULT_CONFIG)
-        mode._error = "timeout"
+        mode.error = "timeout"
         result = gesture_control._compute_orb_state(mode, "3 fingers")
         assert result == _FakeOrbState.ERROR
 
@@ -792,8 +783,9 @@ class TestModeRegistryVoice:
         assert "voice" in registry
 
     def test_all_expected_mode_keys_present(self):
-        """All 8 expected modes should be in the registry."""
+        """All expected modes (v2 + backward compat) should be in the registry."""
         from modes import MODE_REGISTRY as registry
-        expected = {"mouse", "volume", "media", "brightness",
-                     "scroll", "spaces", "custom", "voice"}
+        expected = {"cursor", "system", "voice",
+                     "mouse", "volume", "media", "brightness",
+                     "scroll", "spaces", "custom"}
         assert set(registry.keys()) == expected

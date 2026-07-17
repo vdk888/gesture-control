@@ -2,8 +2,8 @@
 """GestureControl v2 -- multi-mode hand gesture control for macOS.
 
 Run: python3 gesture_control.py
-Fist held 1.5s = cycle Cursor <-> System.  3 fingers = voice (anywhere).
-Press q or Ctrl+C to quit.
+Fist held 1.5s = cycle Cursor <-> System.  3 fingers = voice send (anywhere).
+Peace hold 1s = toggle voice always-on.  Press q or Ctrl+C to quit.
 """
 import time
 import cv2
@@ -41,37 +41,39 @@ CHEAT_SHEET = {
         "Fist hold -> Cursor mode",
         "3 fingers -> Voice",
     ],
-    "Voice": [
-        "Speak -> transcribe + inject",
-        "Peace hold 1s -> always-on toggle",
-    ],
     # Backward-compat cheat sheets preserved for old modes
     "Mouse": [
         "Point -> move cursor",
         "Pinch thumb+index -> click",
         "Fist hold -> next mode",
+        "3 fingers -> Voice send",
     ],
     "Volume": [
         "Point -> adjust volume",
         "Fist hold -> next mode",
+        "3 fingers -> Voice send",
     ],
     "Media": [
         "Open palm hold -> play/pause",
         "Fist hold -> next mode",
+        "3 fingers -> Voice send",
     ],
     "Brightness": [
         "Point -> adjust brightness",
         "Fist hold -> next mode",
+        "3 fingers -> Voice send",
     ],
     "Scroll": [
         "Two fingers up/down -> scroll",
         "Fist hold -> next mode",
+        "3 fingers -> Voice send",
     ],
     "Spaces": [
         "Open palm left/right -> switch desktop",
         "Open palm up -> Mission Control",
         "Open palm down -> Show Desktop",
         "Fist hold -> next mode",
+        "3 fingers -> Voice send",
     ],
 }
 
@@ -187,9 +189,12 @@ def main():
     current_mode = modes[cycle_order[mode_index]]
     current_mode.enter()
 
-    # -- Voice trigger state --
-    voice_active = False         # Are we currently in voice mode?
-    prev_mode_key = None         # Cycle key to return to after voice
+    # -- Peace-sign toggle state (voice always-on) --
+    peace_start = None
+    peace_toggled = False
+
+    # -- 3-finger voice send cooldown --
+    voice_send_cooldown = 0.0
 
     fist_start = None
     fist_active = False
@@ -224,15 +229,31 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
         # ================================================================
-        # 3-FINGER VOICE TRIGGER (from anywhere) — sends last 15s + screenshot
+        # 3-FINGER VOICE SEND (from anywhere, 2s cooldown)
         # ================================================================
         if gesture_name == "3 fingers" and voice_mode is not None:
-            voice_mode.trigger_send()
+            if now - voice_send_cooldown >= 2.0:
+                ok_sent = voice_mode.trigger_send()
+                if ok_sent:
+                    voice_send_cooldown = now
 
         # ================================================================
-        # FIST CYCLE (only when NOT in voice mode)
+        # PEACE SIGN HOLD -> toggle voice always-on
         # ================================================================
-        if not voice_active and gesture_name == "Fist":
+        if gesture_name == "Peace" and voice_mode is not None:
+            if peace_start is None:
+                peace_start = now
+            elif now - peace_start >= 1.0 and not peace_toggled:
+                voice_mode.toggle_always_on()
+                peace_toggled = True
+        else:
+            peace_start = None
+            peace_toggled = False
+
+        # ================================================================
+        # FIST CYCLE (cursor <-> system)
+        # ================================================================
+        if gesture_name == "Fist":
             if fist_start is None:
                 fist_start = now
             elif now - fist_start >= fist_hold and not fist_active:
@@ -243,44 +264,57 @@ def main():
                 fist_active = True
                 if hud:
                     hud.show(text=current_mode.name, level=100)
-        elif not voice_active:
+        else:
             fist_start = None
             fist_active = False
 
         # ================================================================
-        # Dispatch to current mode
+        # Build gesture data
         # ================================================================
         gd = GestureData(
             gesture_name=gesture_name, fingers_up=fingers,
             landmarks=landmarks, frame=frame,
             width=width, height=height, timestamp=now,
         )
+
+        # Background: voice mode HUD streaming (partials via show_transcription)
+        if voice_mode is not None:
+            voice_mode.update(gd)
+
+        # Foreground: cycle mode dispatch + HUD
         hud_data = current_mode.update(gd)
-
-        # Update orb state
-        if orb is not None:
-            orb_state = _compute_orb_state(current_mode, gesture_name)
-            if orb_state is not None:
-                orb.transition_to(orb_state)
-            orb.tick(time.time() - prev)
-
-        # Always show HUD -- orb replaces label content, not the window
         if hud_data:
             hud.show(**hud_data)
         elif orb is not None and not hud._visible:
             hud.show(text="")
 
+        # Update orb state (prefer voice mode attributes when available)
+        if orb is not None:
+            orb_state = OrbState.IDLE
+            if gesture_name:
+                if voice_mode is not None:
+                    if getattr(voice_mode, 'error', None):
+                        orb_state = OrbState.ERROR
+                    elif getattr(voice_mode, 'processing', False):
+                        orb_state = OrbState.THINKING
+                    elif getattr(voice_mode, 'speaking', False):
+                        orb_state = OrbState.SPEAKING
+                    elif getattr(voice_mode, 'listening', False):
+                        orb_state = OrbState.LISTENING
+                if orb_state == OrbState.IDLE:
+                    orb_state = _compute_orb_state(current_mode, gesture_name)
+            if orb_state is not None:
+                orb.transition_to(orb_state)
+            orb.tick(time.time() - prev)
+
         # Camera overlays
-        mode_label = f"Mode: {current_mode.name}"
-        if voice_active:
-            mode_label += " (voice)"
-        cv2.putText(frame, mode_label, (10, 30),
+        cv2.putText(frame, f"Mode: {current_mode.name}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         fps = 1.0 / max(now - prev, 1e-6)
         prev = now
         cv2.putText(frame, f"{fps:4.0f} FPS", (width - 80, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-        hint = "fist 1.5s = cycle    3 fingers = voice    q = quit"
+        hint = "fist 1.5s = cycle    3 fingers = voice send    q = quit"
         cv2.putText(frame, hint, (10, height - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 2)
 
@@ -293,6 +327,8 @@ def main():
 
     cap.release()
     landmarker.close()
+    if voice_mode is not None:
+        voice_mode.exit()
     if hud:
         hud.close()
     cv2.destroyAllWindows()

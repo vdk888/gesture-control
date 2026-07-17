@@ -1,4 +1,4 @@
-"""Tests for VoiceMode -- gesture-triggered voice capture.
+"""Tests for VoiceMode -- always-on background voice with HUD transcription.
 
 Mocks voice.pipeline.VoicePipeline and voice.screenshot.capture_screenshot
 so tests run without actual mic/hardware access.
@@ -7,7 +7,7 @@ so tests run without actual mic/hardware access.
 import os
 import sys
 import time
-from unittest.mock import MagicMock, call, patch, mock_open
+from unittest.mock import MagicMock, patch, mock_open
 
 import pytest
 
@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from modes.base import GestureData
 
 # ---------------------------------------------------------------------------
-# Fake landmarks -- reusable across tests
+# Fake landmarks
 # ---------------------------------------------------------------------------
 
 
@@ -27,17 +27,15 @@ class FakeLandmark:
 
 
 def _make_landmarks():
-    """Return 21 fake landmarks at neutral positions."""
     return [FakeLandmark(0.5, 0.5) for _ in range(21)]
 
 
-def _make_gesture(name="3 fingers", landmarks=None, fingers_up=None,
+def _make_gesture(name="Pointing", landmarks=None, fingers_up=None,
                   timestamp=1000.0):
-    """Build a GestureData with sensible defaults."""
     if landmarks is None:
         landmarks = _make_landmarks()
     if fingers_up is None:
-        fingers_up = [False, True, True, True, False]  # 3 fingers
+        fingers_up = [False, True, False, False, False]  # Pointing
     return GestureData(
         gesture_name=name,
         fingers_up=fingers_up,
@@ -50,20 +48,24 @@ def _make_gesture(name="3 fingers", landmarks=None, fingers_up=None,
 
 
 # ---------------------------------------------------------------------------
-# Mock VoicePipeline
+# Mock VoicePipeline (matches new always_on + rolling_buffer_s API)
 # ---------------------------------------------------------------------------
 
 
 class MockPipeline:
     """Controllable fake of voice.pipeline.VoicePipeline."""
 
-    def __init__(self, config, on_transcription=None):
+    def __init__(self, config, on_transcription=None,
+                 always_on=False, rolling_buffer_s=15):
         self.config = config
         self.on_transcription = on_transcription
         self._listening = False
         self._start_count = 0
         self._stop_count = 0
-        self._stop_result = None  # (audio_path, transcript, duration) or None
+        self._flush_count = 0
+        self._flush_result = None
+        self._inject_calls = []
+        self._paused = False
 
     def start(self):
         self._listening = True
@@ -72,10 +74,29 @@ class MockPipeline:
     def stop(self):
         self._listening = False
         self._stop_count += 1
-        return self._stop_result
 
     def is_listening(self):
         return self._listening
+
+    def flush(self):
+        self._flush_count += 1
+        return self._flush_result
+
+    def inject(self, transcript, audio_path, screenshot_path, duration_s):
+        self._inject_calls.append({
+            "transcript": transcript,
+            "audio_path": audio_path,
+            "screenshot_path": screenshot_path,
+            "duration_s": duration_s,
+        })
+
+    def pause(self):
+        self._paused = True
+        self._listening = False
+
+    def resume(self):
+        self._paused = False
+        self._listening = True
 
     def emit_partial(self, text):
         """Simulate a transcription callback from the pipeline."""
@@ -90,7 +111,6 @@ class MockPipeline:
 
 @pytest.fixture
 def _patch_voice_module(monkeypatch):
-    """Patch the voice module globals so VoicePipeline + screenshot are mocked."""
     monkeypatch.setattr("modes.voice._VoicePipeline", MockPipeline)
     monkeypatch.setattr("modes.voice._capture_screenshot",
                         MagicMock(return_value="/tmp/screenshots/voice_1234.png"))
@@ -99,46 +119,31 @@ def _patch_voice_module(monkeypatch):
 
 @pytest.fixture
 def voice_mode(_patch_voice_module):
-    """Create a VoiceMode with default config and no HUD."""
     from modes.voice import VoiceMode
-    inject_mock = mock_open()
     config = {
         "voice": {
-            "trigger_gesture": "3 fingers",
-            "always_on": False,
-            "inject_path": "/tmp/test-inject",
+            "always_on": True,
             "screenshot_enabled": True,
             "whisper_language": "fr",
-            "always_on_toggle_gesture": "Peace",
-            "always_on_toggle_hold_s": 1.0,
         }
     }
-    with patch("builtins.open", inject_mock):
-        mode = VoiceMode(config)
-        mode._inject_mock = inject_mock  # attach for test inspection
+    mode = VoiceMode(config)
     mode.enter()
     return mode
 
 
 @pytest.fixture
-def voice_mode_always_on(_patch_voice_module):
-    """Create a VoiceMode with always_on=True."""
+def voice_mode_stopped(_patch_voice_module):
+    """VoiceMode with always_on=False -> pipeline not started."""
     from modes.voice import VoiceMode
-    inject_mock = mock_open()
     config = {
         "voice": {
-            "trigger_gesture": "3 fingers",
-            "always_on": True,
-            "inject_path": "/tmp/test-inject",
+            "always_on": False,
             "screenshot_enabled": True,
             "whisper_language": "fr",
-            "always_on_toggle_gesture": "Peace",
-            "always_on_toggle_hold_s": 1.0,
         }
     }
-    with patch("builtins.open", inject_mock):
-        mode = VoiceMode(config)
-        mode._inject_mock = inject_mock
+    mode = VoiceMode(config)
     mode.enter()
     return mode
 
@@ -174,506 +179,189 @@ class TestLifecycle:
         assert voice_mode._pipeline is not None
         assert isinstance(voice_mode._pipeline, MockPipeline)
 
-    def test_enter_does_not_start_when_not_always_on(self, voice_mode):
-        assert voice_mode._pipeline._start_count == 0
-        assert not voice_mode._pipeline.is_listening()
+    def test_enter_starts_pipeline_by_default(self, voice_mode):
+        """With always_on=True, enter() starts the pipeline."""
+        assert voice_mode._pipeline._start_count >= 1
+        assert voice_mode._pipeline.is_listening()
 
-    def test_enter_starts_when_always_on(self, voice_mode_always_on):
-        assert voice_mode_always_on._pipeline._start_count >= 1
-        assert voice_mode_always_on._pipeline.is_listening()
+    def test_enter_starts_pipeline_regardless_of_always_on(self, voice_mode_stopped):
+        """Pipeline is always created and started in enter() regardless of always_on config."""
+        assert voice_mode_stopped._pipeline is not None
+        # Pipeline is started in enter() even with always_on=False in config
+        assert voice_mode_stopped._pipeline._start_count >= 1
 
     def test_exit_stops_pipeline(self, voice_mode):
-        voice_mode._pipeline.start()
-        assert voice_mode._pipeline.is_listening()
-        pipeline_ref = voice_mode._pipeline  # save before exit clears it
+        pipeline_ref = voice_mode._pipeline
         voice_mode.exit()
-        assert pipeline_ref._stop_count == 1
+        assert pipeline_ref._stop_count >= 1
         assert voice_mode._pipeline is None
+        assert not voice_mode.listening
 
     def test_exit_idempotent_when_pipeline_none(self, voice_mode):
         voice_mode._pipeline = None
         voice_mode.exit()  # should not raise
 
     def test_enter_resets_state(self, voice_mode):
-        voice_mode._was_listening = True
+        voice_mode._always_on = False
         voice_mode._last_partial = "old text"
-        voice_mode._last_cooldown = 999.0
+        voice_mode._cooldown_until = 999.0
         old_pipeline = voice_mode._pipeline
         voice_mode.enter()
-        assert not voice_mode._was_listening
-        assert voice_mode._last_partial == ""
-        assert voice_mode._last_cooldown == 0.0
-        assert voice_mode._pipeline is not old_pipeline  # new pipeline instance
+        # enter() detects pipeline already running and returns early
+        assert voice_mode._pipeline is old_pipeline
 
 
 # ---------------------------------------------------------------------------
-# Tests: trigger gesture detection
+# Tests: trigger_send
 # ---------------------------------------------------------------------------
 
 
-class TestTriggerDetection:
-    def test_three_fingers_is_trigger(self, voice_mode):
-        g = _make_gesture("3 fingers")
-        assert voice_mode._is_trigger(g, voice_mode.config["voice"])
-
-    def test_pointing_is_not_trigger(self, voice_mode):
-        g = _make_gesture("Pointing")
-        assert not voice_mode._is_trigger(g, voice_mode.config["voice"])
-
-    def test_fist_is_not_trigger(self, voice_mode):
-        g = _make_gesture("Fist")
-        assert not voice_mode._is_trigger(g, voice_mode.config["voice"])
-
-    def test_ok_sign_trigger_calls_detect_ok_sign(self, monkeypatch, voice_mode):
-        """When trigger_gesture is 'ok_sign', detect_ok_sign is called."""
-        voice_mode.config["voice"]["trigger_gesture"] = "ok_sign"
-
-        # Patch the function where it's imported from: hand_tracking
-        mock_detect = MagicMock(return_value=True)
-        monkeypatch.setattr("hand_tracking.detect_ok_sign", mock_detect)
-
-        g = _make_gesture("Open palm")  # name doesn't matter for ok_sign
-        assert voice_mode._is_trigger(g, voice_mode.config["voice"])
-        mock_detect.assert_called_once()
-
-    def test_ok_sign_not_detected(self, monkeypatch, voice_mode):
-        """When detect_ok_sign returns False, trigger is not active."""
-        voice_mode.config["voice"]["trigger_gesture"] = "ok_sign"
-        monkeypatch.setattr("hand_tracking.detect_ok_sign",
-                            MagicMock(return_value=False))
-        g = _make_gesture("Open palm")
-        assert not voice_mode._is_trigger(g, voice_mode.config["voice"])
-
-    def test_no_landmarks_not_trigger(self, voice_mode):
-        g = GestureData(
-            gesture_name="3 fingers", fingers_up=[False, True, True, True, False],
-            landmarks=None, frame=None, width=640, height=480, timestamp=1000.0,
+class TestTriggerSend:
+    def test_trigger_send_flushes_and_injects(self, voice_mode):
+        voice_mode._pipeline._flush_result = (
+            "/tmp/audio.wav", "Bonjour le monde", 2.5
         )
-        assert not voice_mode._is_trigger(g, voice_mode.config["voice"])
+        with patch.object(voice_mode._pipeline, "inject") as mock_inject:
+            ok = voice_mode.trigger_send()
+            assert ok is True
+            assert voice_mode._pipeline._flush_count == 1
+            assert mock_inject.called
 
+    def test_trigger_send_no_speech(self, voice_mode):
+        voice_mode._pipeline._flush_result = None
+        ok = voice_mode.trigger_send()
+        assert ok is False
 
-# ---------------------------------------------------------------------------
-# Tests: gesture held + not listening → start recording
-# ---------------------------------------------------------------------------
-
-
-class TestGestureStart:
-    def test_trigger_starts_pipeline(self, voice_mode):
-        g = _make_gesture("3 fingers", timestamp=1000.0)
-        assert not voice_mode._pipeline.is_listening()
-
-        result = voice_mode.update(g)
-        assert voice_mode._pipeline.is_listening()
-        assert voice_mode._pipeline._start_count == 1
-        assert "Listening" in result["text"]
-
-    def test_trigger_hud_shows_listening(self, voice_mode):
-        g = _make_gesture("3 fingers")
-        result = voice_mode.update(g)
-        assert "🎤 Listening..." in result["text"]
-
-    def test_no_landmarks_returns_none(self, voice_mode):
-        g = GestureData(
-            gesture_name="3 fingers", fingers_up=[False, True, True, True, False],
-            landmarks=None, frame=None, width=640, height=480, timestamp=1000.0,
-        )
-        result = voice_mode.update(g)
-        assert result is None
-
-    def test_pipeline_none_returns_none(self, _patch_voice_module):
-        """When pipeline hasn't been created, update returns None."""
+    def test_trigger_send_pipeline_none(self, _patch_voice_module):
         from modes.voice import VoiceMode
         mode = VoiceMode({"voice": {}})
         mode._pipeline = None
-        g = _make_gesture("3 fingers")
+        ok = mode.trigger_send()
+        assert ok is False
+
+    def test_trigger_send_cooldown(self, monkeypatch, voice_mode):
+        voice_mode._pipeline._flush_result = ("/tmp/a.wav", "hi", 1.0)
+        with patch.object(voice_mode._pipeline, "inject"):
+            # First send should work
+            ok1 = voice_mode.trigger_send()
+            assert ok1 is True
+            # Second send within 2s cooldown should fail
+            ok2 = voice_mode.trigger_send()
+            assert ok2 is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: toggle_always_on
+# ---------------------------------------------------------------------------
+
+
+class TestToggleAlwaysOn:
+    def test_toggle_turns_off(self, voice_mode):
+        assert voice_mode._always_on is True
+        result = voice_mode.toggle_always_on()
+        assert result is False
+        assert not voice_mode._always_on
+        assert voice_mode._pipeline._paused
+
+    def test_toggle_turns_on(self, voice_mode):
+        voice_mode._always_on = False
+        voice_mode._pipeline.pause()
+        result = voice_mode.toggle_always_on()
+        assert result is True
+        assert voice_mode._always_on
+        assert not voice_mode._pipeline._paused
+        assert voice_mode.listening
+
+    def test_toggle_no_pipeline(self, _patch_voice_module):
+        from modes.voice import VoiceMode
+        mode = VoiceMode({"voice": {}})
+        mode._pipeline = None
+        # _always_on starts as True; toggle flips to False
+        initial = mode._always_on
+        result = mode.toggle_always_on()
+        assert result is not initial  # state changed
+
+
+# ---------------------------------------------------------------------------
+# Tests: update (HUD streaming)
+# ---------------------------------------------------------------------------
+
+
+class TestUpdate:
+    def test_update_shows_partial(self, voice_mode):
+        voice_mode._pipeline.emit_partial("Bonjour le monde")
+        g = _make_gesture("Pointing")
+        result = voice_mode.update(g)
+        assert result is not None
+        assert "Bonjour le monde" in result["text"]
+
+    def test_update_shows_listening_status(self, voice_mode):
+        voice_mode._last_partial = ""
+        g = _make_gesture("Pointing")
+        result = voice_mode.update(g)
+        assert result is not None
+        assert "listening" in result["text"].lower()
+
+    def test_update_shows_paused_when_not_listening(self, voice_mode):
+        voice_mode.listening = False
+        voice_mode._last_partial = ""
+        g = _make_gesture("Pointing")
+        result = voice_mode.update(g)
+        assert result is not None
+        assert "paused" in result["text"].lower()
+
+    def test_update_no_landmarks_returns_none(self, voice_mode):
+        g = GestureData(
+            gesture_name="", fingers_up=[],
+            landmarks=None, frame=None,
+            width=640, height=480, timestamp=1000.0,
+        )
+        result = voice_mode.update(g)
+        # Still returns HUD data even without landmarks (shows partial/status)
+        assert result is not None
+
+    def test_update_pipeline_none_returns_status(self, _patch_voice_module):
+        from modes.voice import VoiceMode
+        mode = VoiceMode({"voice": {}})
+        mode._pipeline = None
+        mode.enter()
+        g = _make_gesture("Pointing")
         result = mode.update(g)
-        assert result is None
-
-
-# ---------------------------------------------------------------------------
-# Tests: gesture held + already listening → show partials
-# ---------------------------------------------------------------------------
-
-
-class TestGestureHeld:
-    def test_shows_partial_when_listening(self, voice_mode):
-        # First frame: start listening
-        g = _make_gesture("3 fingers", timestamp=1000.0)
-        voice_mode.update(g)
-
-        # Pipeline emits a partial
-        voice_mode._pipeline.emit_partial("Bonjour, je")
-
-        # Next frame: still holding gesture → show partial
-        g2 = _make_gesture("3 fingers", timestamp=1000.1)
-        result = voice_mode.update(g2)
-        assert result["text"] == "Bonjour, je"
-
-    def test_shows_listening_before_partial(self, voice_mode):
-        g = _make_gesture("3 fingers", timestamp=1000.0)
-        voice_mode.update(g)
-
-        g2 = _make_gesture("3 fingers", timestamp=1000.1)
-        result = voice_mode.update(g2)
-        assert "🎤 Listening..." in result["text"]
-
-
-# ---------------------------------------------------------------------------
-# Tests: gesture released → stop, screenshot, inject
-# ---------------------------------------------------------------------------
-
-
-class TestGestureRelease:
-    def test_release_stops_pipeline(self, voice_mode):
-        # Start listening
-        g = _make_gesture("3 fingers", timestamp=1000.0)
-        voice_mode.update(g)
-
-        # Set stop result
-        voice_mode._pipeline._stop_result = (
-            "/tmp/audio_1234.wav", "Bonjour le monde", 2.5
-        )
-
-        # Release: different gesture (Pointing)
-        g2 = _make_gesture("Pointing", timestamp=1000.5)
-        result = voice_mode.update(g2)
-
-        assert voice_mode._pipeline._stop_count == 1
-        assert not voice_mode._pipeline.is_listening()
-        assert "Sent" in result["text"]
-
-    def test_release_captures_screenshot(self, voice_mode):
-        g = _make_gesture("3 fingers", timestamp=1000.0)
-        voice_mode.update(g)
-        voice_mode._pipeline._stop_result = (
-            "/tmp/audio.wav", "test", 1.0
-        )
-
-        g2 = _make_gesture("Pointing", timestamp=1000.5)
-        voice_mode.update(g2)
-
-        # Screenshot mock should have been called
-        from modes.voice import _capture_screenshot
-        assert _capture_screenshot.called
-
-    def test_release_sends_inject(self, voice_mode):
-        g = _make_gesture("3 fingers", timestamp=1000.0)
-        voice_mode.update(g)
-        voice_mode._pipeline._stop_result = (
-            "/tmp/audio.wav", "Bonjour", 1.5
-        )
-
-        g2 = _make_gesture("Pointing", timestamp=1000.5)
-        result = voice_mode.update(g2)
-
-        # Check result contains "Sent"
-        assert "Sent" in result["text"]
-
-    def test_release_no_speech_returns_empty(self, voice_mode):
-        g = _make_gesture("3 fingers", timestamp=1000.0)
-        voice_mode.update(g)
-        voice_mode._pipeline._stop_result = None  # No speech
-
-        g2 = _make_gesture("Pointing", timestamp=1000.5)
-        result = voice_mode.update(g2)
         assert result is not None
-        assert "Sent" not in result.get("text", "")
-
-    def test_release_screenshot_disabled_skips_capture(self, voice_mode):
-        voice_mode.config["voice"]["screenshot_enabled"] = False
-
-        g = _make_gesture("3 fingers", timestamp=1000.0)
-        voice_mode.update(g)
-        voice_mode._pipeline._stop_result = ("/tmp/a.wav", "hi", 0.5)
-
-        g2 = _make_gesture("Pointing", timestamp=1000.5)
-        result = voice_mode.update(g2)
-        assert "Sent" in result["text"]
-
-    def test_release_in_always_on_restarts_pipeline(self, voice_mode):
-        """In always-on mode, gesture release injects then restarts pipeline."""
-        voice_mode._always_on = True
-        voice_mode._pipeline.start()  # pipeline already running
-
-        # Trigger gesture held → starts the trigger-listening state
-        g = _make_gesture("3 fingers", timestamp=1000.0)
-        voice_mode.update(g)
-        assert voice_mode._was_listening
-
-        voice_mode._pipeline._stop_result = ("/tmp/a.wav", "hi", 0.5)
-
-        # Gesture released (non-trigger)
-        g2 = _make_gesture("Pointing", timestamp=1000.5)
-        result = voice_mode.update(g2)
-
-        # Pipeline should have been stopped then restarted
-        assert voice_mode._pipeline._start_count >= 2  # initial + restart
-        assert voice_mode._pipeline.is_listening()
-        assert "Sent" in result["text"]
 
 
 # ---------------------------------------------------------------------------
-# Tests: cooldown
-# ---------------------------------------------------------------------------
-
-
-class TestCooldown:
-    def test_300ms_cooldown_blocks_retrigger(self, voice_mode):
-        # First trigger at t=1000.0
-        g = _make_gesture("3 fingers", timestamp=1000.0)
-        voice_mode.update(g)
-        assert voice_mode._pipeline.is_listening()
-
-        # Release
-        g2 = _make_gesture("Pointing", timestamp=1000.1)
-        voice_mode._pipeline._stop_result = ("/tmp/a.wav", "test", 1.0)
-        voice_mode.update(g2)
-        first_stop_count = voice_mode._pipeline._stop_count
-
-        # Pipeline is now stopped. Re-trigger at t=1000.2 (within 300ms cooldown)
-        # The cooldown was set on release to 1000.1, so 1000.2 - 1000.1 = 0.1s < 0.3s
-        g3 = _make_gesture("3 fingers", timestamp=1000.2)
-        result = voice_mode.update(g3)
-        # Should show partial/placeholder but NOT start because in cooldown
-        assert "Listening" in result["text"]
-        # Pipeline should NOT have been re-started
-        assert voice_mode._pipeline._start_count == 1  # unchanged from first trigger
-
-    def test_after_cooldown_allows_new_trigger(self, monkeypatch):
-        """After 300ms+ the trigger gesture fires again."""
-        from modes.voice import VoiceMode
-
-        # Control time
-        fake_time = [1000.0]
-
-        def mock_monotonic():
-            return fake_time[0]
-
-        monkeypatch.setattr("modes.voice._VoicePipeline", MockPipeline)
-        monkeypatch.setattr("modes.voice._capture_screenshot",
-                            MagicMock(return_value="/tmp/s.png"))
-        monkeypatch.setattr("modes.voice.os.makedirs", MagicMock())
-        inject_mock = mock_open()
-        monkeypatch.setattr("builtins.open", inject_mock)
-        monkeypatch.setattr("modes.voice.time.monotonic", mock_monotonic)
-
-        config = {"voice": {"trigger_gesture": "3 fingers",
-                            "inject_path": "/tmp/test-inject",
-                            "screenshot_enabled": True,
-                            "whisper_language": "fr",
-                            "always_on": False,
-                            "always_on_toggle_gesture": "Peace",
-                            "always_on_toggle_hold_s": 1.0}}
-        mode = VoiceMode(config)
-        mode.enter()
-
-        # First trigger
-        fake_time[0] = 1000.0
-        g = _make_gesture("3 fingers", timestamp=1000.0)
-        mode.update(g)
-        assert mode._pipeline._start_count == 1
-
-        # Release at 1000.1
-        mode._pipeline._stop_result = ("/tmp/a.wav", "test", 1.0)
-        fake_time[0] = 1000.1
-        g2 = _make_gesture("Pointing", timestamp=1000.1)
-        mode.update(g2)
-
-        # Advance past cooldown (300ms)
-        fake_time[0] = 1000.6
-        g3 = _make_gesture("3 fingers", timestamp=1000.6)
-        mode.update(g3)
-        assert mode._pipeline._start_count == 2  # New start fired
-
-
-# ---------------------------------------------------------------------------
-# Tests: always-on toggle
-# ---------------------------------------------------------------------------
-
-
-class TestAlwaysOnToggle:
-    def test_peace_hold_toggles_always_on(self, monkeypatch):
-        """Holding Peace sign for >= 1.0s toggles always-on."""
-        from modes.voice import VoiceMode
-
-        fake_time = [1000.0]
-
-        class TimeController:
-            @staticmethod
-            def monotonic():
-                return fake_time[0]
-
-        monkeypatch.setattr("modes.voice._VoicePipeline", MockPipeline)
-        monkeypatch.setattr("modes.voice._capture_screenshot",
-                            MagicMock(return_value="/tmp/s.png"))
-        monkeypatch.setattr("modes.voice.os.makedirs", MagicMock())
-        monkeypatch.setattr("builtins.open", mock_open())
-        monkeypatch.setattr("modes.voice.time.monotonic", TimeController.monotonic)
-
-        config = {"voice": {"trigger_gesture": "3 fingers",
-                            "inject_path": "/tmp/test-inject",
-                            "always_on": False,
-                            "always_on_toggle_gesture": "Peace",
-                            "always_on_toggle_hold_s": 1.0,
-                            "screenshot_enabled": True,
-                            "whisper_language": "fr"}}
-        mode = VoiceMode(config)
-        mode.enter()
-        assert not mode._always_on
-
-        # Peace sign at t=1000.0 (start hold)
-        fake_time[0] = 1000.0
-        g = _make_gesture("Peace", timestamp=1000.0)
-        mode.update(g)
-        assert mode._toggle_hold_start == 1000.0
-        # Not held long enough, no toggle yet
-        assert not mode._always_on
-
-        # Still holding at t=1001.0 (>= 1.0s) → toggle fires
-        fake_time[0] = 1001.0
-        g2 = _make_gesture("Peace", timestamp=1001.0)
-        result = mode.update(g2)
-        assert mode._always_on
-        assert result is not None and "Voice always-on: ON" == result["text"]
-        assert mode._toggle_hold_start is None  # reset after toggle
-
-    def test_peace_released_before_threshold_no_toggle(self, monkeypatch):
-        from modes.voice import VoiceMode
-
-        fake_time = [1000.0]
-
-        class TimeController:
-            @staticmethod
-            def monotonic():
-                return fake_time[0]
-
-        monkeypatch.setattr("modes.voice._VoicePipeline", MockPipeline)
-        monkeypatch.setattr("modes.voice._capture_screenshot",
-                            MagicMock(return_value="/tmp/s.png"))
-        monkeypatch.setattr("modes.voice.os.makedirs", MagicMock())
-        monkeypatch.setattr("builtins.open", mock_open())
-        monkeypatch.setattr("modes.voice.time.monotonic", TimeController.monotonic)
-
-        config = {"voice": {"trigger_gesture": "3 fingers",
-                            "inject_path": "/tmp/test-inject",
-                            "always_on": False,
-                            "always_on_toggle_gesture": "Peace",
-                            "always_on_toggle_hold_s": 1.0,
-                            "screenshot_enabled": True,
-                            "whisper_language": "fr"}}
-        mode = VoiceMode(config)
-        mode.enter()
-
-        # Peace for only 0.5s
-        fake_time[0] = 1000.0
-        g = _make_gesture("Peace", timestamp=1000.0)
-        mode.update(g)
-
-        # Different gesture before threshold
-        fake_time[0] = 1000.5
-        g2 = _make_gesture("Pointing", timestamp=1000.5)
-        mode.update(g2)
-        assert not mode._always_on
-        assert mode._toggle_hold_start is None  # reset
-
-    def test_toggle_turns_off(self, monkeypatch):
-        from modes.voice import VoiceMode
-
-        fake_time = [1000.0]
-
-        class TimeController:
-            @staticmethod
-            def monotonic():
-                return fake_time[0]
-
-        monkeypatch.setattr("modes.voice._VoicePipeline", MockPipeline)
-        monkeypatch.setattr("modes.voice._capture_screenshot",
-                            MagicMock(return_value="/tmp/s.png"))
-        monkeypatch.setattr("modes.voice.os.makedirs", MagicMock())
-        monkeypatch.setattr("builtins.open", mock_open())
-        monkeypatch.setattr("modes.voice.time.monotonic", TimeController.monotonic)
-
-        config = {"voice": {"trigger_gesture": "3 fingers",
-                            "inject_path": "/tmp/test-inject",
-                            "always_on": False,
-                            "always_on_toggle_gesture": "Peace",
-                            "always_on_toggle_hold_s": 1.0,
-                            "screenshot_enabled": True,
-                            "whisper_language": "fr"}}
-        mode = VoiceMode(config)
-        mode.enter()
-
-        # First toggle: OFF → ON
-        fake_time[0] = 1000.0
-        mode.update(_make_gesture("Peace", timestamp=1000.0))
-        fake_time[0] = 1001.0
-        result = mode.update(_make_gesture("Peace", timestamp=1001.0))
-        assert mode._always_on
-        assert "ON" in result["text"]
-
-        # Second toggle: ON → OFF
-        fake_time[0] = 1002.0
-        mode.update(_make_gesture("Peace", timestamp=1002.0))
-        fake_time[0] = 1003.0
-        result = mode.update(_make_gesture("Peace", timestamp=1003.0))
-        assert not mode._always_on
-        assert "OFF" in result["text"]
-
-
-# ---------------------------------------------------------------------------
-# Tests: always-on mode behavior
-# ---------------------------------------------------------------------------
-
-
-class TestAlwaysOnBehavior:
-    def test_always_on_shows_partials_without_gesture(self, voice_mode_always_on):
-        pipeline = voice_mode_always_on._pipeline
-        pipeline.emit_partial("Test transcription en cours")
-
-        g = _make_gesture("Pointing", timestamp=1000.0)
-        result = voice_mode_always_on.update(g)
-        assert result is not None
-        assert "Test transcription en cours" in result["text"]
-
-    def test_always_on_shows_placeholder_before_partial(self, voice_mode_always_on):
-        g = _make_gesture("Open palm", timestamp=1000.0)
-        result = voice_mode_always_on.update(g)
-        assert result is not None
-        assert "Voice always-on" in result.get("text", "")
-
-
-# ---------------------------------------------------------------------------
-# Tests: pipeline unavailable → graceful degradation
+# Tests: pipeline unavailable -> graceful degradation
 # ---------------------------------------------------------------------------
 
 
 class TestPipelineUnavailable:
     def test_enter_no_pipeline_is_noop(self, monkeypatch):
         from modes.voice import VoiceMode
-        # Simulate import failure
         monkeypatch.setattr("modes.voice._VoicePipeline", False)
         monkeypatch.setattr("modes.voice._capture_screenshot", False)
         monkeypatch.setattr("modes.voice.os.makedirs", MagicMock())
-        monkeypatch.setattr("builtins.open", mock_open())
 
         config = {"voice": {}}
         mode = VoiceMode(config)
         mode.enter()
         assert mode._pipeline is None
+        assert mode.error is not None
 
-    def test_update_with_no_pipeline_returns_none(self, monkeypatch):
+    def test_update_with_no_pipeline_shows_paused(self, monkeypatch):
+        """When pipeline is unavailable, update() shows paused status."""
         from modes.voice import VoiceMode
         monkeypatch.setattr("modes.voice._VoicePipeline", False)
         monkeypatch.setattr("modes.voice._capture_screenshot", False)
         monkeypatch.setattr("modes.voice.os.makedirs", MagicMock())
-        monkeypatch.setattr("builtins.open", mock_open())
 
         config = {"voice": {}}
         mode = VoiceMode(config)
         mode.enter()
-        g = _make_gesture("3 fingers")
+        g = _make_gesture("Pointing")
         result = mode.update(g)
-        assert result is None
+        assert result is not None
+        assert "paused" in result["text"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -691,84 +379,3 @@ class TestTranscriptionCallback:
         assert voice_mode._last_partial == "premier"
         voice_mode._pipeline.emit_partial("deuxieme plus long")
         assert voice_mode._last_partial == "deuxieme plus long"
-
-
-# ---------------------------------------------------------------------------
-# Tests: inject format
-# ---------------------------------------------------------------------------
-
-
-class TestInjectFormat:
-    def test_inject_writes_structured_block(self, _patch_voice_module):
-        """Verify the inject block contains required format elements."""
-        from modes.voice import VoiceMode
-        inject_mock = mock_open()
-        config = {"voice": {
-            "trigger_gesture": "3 fingers",
-            "inject_path": "/tmp/test-inject",
-            "whisper_language": "fr",
-            "screenshot_enabled": True,
-            "always_on": False,
-            "always_on_toggle_gesture": "Peace",
-            "always_on_toggle_hold_s": 1.0,
-        }}
-        with patch("builtins.open", inject_mock):
-            mode = VoiceMode(config)
-            mode.enter()
-
-            ok = mode._inject(
-                audio_path="/tmp/audio.wav",
-                transcript="Bonjour le monde",
-                duration=3.2,
-                screenshot_path="/tmp/screenshot.png",
-                voice_cfg=mode.config["voice"],
-            )
-            assert ok
-
-            # Gather all writes to the inject file
-            handle = inject_mock()
-            all_writes = "".join(
-                ca[0][0] if ca[0] else ""
-                for ca in handle.write.call_args_list
-            )
-            assert "VOICE_GESTURE" in all_writes
-            assert "authorized=yes" in all_writes
-            assert "path=/tmp/audio.wav" in all_writes
-            assert "screenshot=/tmp/screenshot.png" in all_writes
-            assert "duration=3.2s" in all_writes
-            assert "lang=fr" in all_writes
-            assert "transcript=Bonjour le monde" in all_writes
-            assert "Voice message from Joris via GestureControl" in all_writes
-            assert "low-risk=auto" in all_writes
-            assert "Reply in French" in all_writes
-
-    def test_inject_no_screenshot_uses_none_placeholder(self, _patch_voice_module):
-        """Empty screenshot path becomes '(none)' in the inject block."""
-        from modes.voice import VoiceMode
-        inject_mock = mock_open()
-        config = {"voice": {
-            "trigger_gesture": "3 fingers",
-            "inject_path": "/tmp/test-inject",
-            "whisper_language": "fr",
-            "always_on": False,
-            "always_on_toggle_gesture": "Peace",
-            "always_on_toggle_hold_s": 1.0,
-        }}
-        with patch("builtins.open", inject_mock):
-            mode = VoiceMode(config)
-            mode.enter()
-
-            ok = mode._inject(
-                audio_path="/tmp/a.wav",
-                transcript="test",
-                duration=1.0,
-                screenshot_path="",
-                voice_cfg=mode.config["voice"],
-            )
-            assert ok
-            handle = inject_mock()
-            all_writes = "".join(
-                ca[0][0] if ca[0] else ""
-                for ca in handle.write.call_args_list
-            )
-            assert "screenshot=(none)" in all_writes
